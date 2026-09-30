@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SafePromiseResolve · execution order demo</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; background: light-dark(#f4f6fa, #111722); color: light-dark(#172235, #e7edf7); }
+    body { max-inline-size: 960px; margin: auto; padding: 3rem 1.25rem; line-height: 1.6; }
+    h1 { font-size: clamp(2rem, 5vw, 3rem); line-height: 1.15; letter-spacing: -.04em; margin-block: .5rem 1rem; }
+    h2 { font-size: 1.15rem; margin-block-start: 0; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: .8rem; font-weight: 700; color: light-dark(#485abb, #aebcff); }
+    .intro { max-inline-size: 72ch; }
+    .controls { display: flex; flex-wrap: wrap; gap: .75rem; margin-block: 1.5rem; }
+    button { font: inherit; font-weight: 650; padding: .65rem 1rem; border-radius: .5rem; border: 1px solid light-dark(#a7b1c4, #58657d); background: light-dark(white, #202c40); color: inherit; cursor: pointer; }
+    button.primary { background: #394fc4; color: white; border-color: #394fc4; }
+    button:disabled { opacity: .55; cursor: wait; }
+    :focus-visible { outline: 3px solid light-dark(#925400, #ffc566); outline-offset: 4px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 1rem; }
+    article, .note { background: light-dark(white, #1b2535); border: 1px solid light-dark(#d5dce8, #35435a); border-radius: .75rem; padding: 1.25rem; }
+    article p { color: light-dark(#4d5d74, #b3c1d6); }
+    ol { padding-inline-start: 1.7rem; min-block-size: 10rem; font: .9rem/1.9 ui-monospace, monospace; }
+    li.getter { font-weight: 750; color: light-dark(#754500, #ffc566); }
+    #status { min-block-size: 3rem; font-weight: 650; }
+    .note { margin-block: 1.5rem; }
+    code { font-family: ui-monospace, monospace; font-size: .9em; overflow-wrap: anywhere; }
+    pre { padding: 1rem; overflow: auto; background: light-dark(#e9edf5, #0e1520); border-radius: .5rem; line-height: 1.6; }
+    pre code { overflow-wrap: normal; }
+    summary { cursor: pointer; font-weight: 650; }
+    footer { margin-block-start: 2rem; font-size: .85rem; color: light-dark(#4d5d74, #b3c1d6); }
+    a { color: light-dark(#3349b4, #aebcff); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow">Promise resolution / live experiment</div>
+    <h1>When does the getter run?</h1>
+    <p class="intro">Resolving a promise can run your code before the caller returns. SafePromiseResolve moves that work to a microtask. Watch a <code>then</code> getter change position in the execution order below.</p>
+  </header>
+  <div class="note">
+    <strong>Open the Web Console before running.</strong>
+    In Firefox, press <kbd>Ctrl+Shift+K</kbd> (macOS: <kbd>⌘⌥K</kbd>).
+    A build with the warning patch should report reordering once per page load.
+    This demo uses a stream’s <code>start()</code> return value; Firefox builds with that SafeResolve path do not need the experimental pref.
+  </div>
+  <div class="controls">
+    <button class="primary" id="run" type="button">Run demo</button>
+    <button id="reload" type="button">Reload page to reset warning</button>
+  </div>
+  <p id="status" role="status">Ready. Nothing has run yet.</p>
+  <div class="grid">
+    <article>
+      <h2>Ordinary Promise.resolve</h2>
+      <p>The <code>then</code> getter runs during the call.</p>
+      <ol id="ordinary"><li>Waiting for a run.</li></ol>
+    </article>
+    <article>
+      <h2>ReadableStream start result</h2>
+      <p>With SafeResolve, the getter runs after the constructor returns.</p>
+      <ol id="stream"><li>Waiting for a run.</li></ol>
+    </article>
+  </div>
+  <p>Run again to repeat the ordering experiment. The browser warning should not repeat until you reload. Clearing the console or the on-page trace does not reset the document’s warning state.</p>
+  <details>
+    <summary>The code that triggers safe resolution</summary>
+    <pre><code>const thenable = {
+  get then() {
+    console.log("then getter");
+    return resolve =&gt; resolve();
+  }
+};
+new ReadableStream({
+  start() {
+    return thenable;
+  },
+  pull(controller) {
+    controller.close();
+  }
+});
+console.log("constructor returned");</code></pre>
+    <p>Ordinary resolution reads <code>then</code> synchronously, though it calls the returned function in a microtask. Safe resolution defers the getter too. The page observes this order directly; it cannot inspect Firefox’s native console warning or read browser preferences.</p>
+  </details>
+  <footer>No dependencies, network requests, or build step. <a href="https://tc39.es/proposal-thenable-curtailment/">Thenable curtailment proposal</a>.</footer>
+  <script>
+    const runButton = document.querySelector("#run");
+    const status = document.querySelector("#status");
+    let runCount = 0;
+
+    async function traceResolution(kind) {
+      const list = document.querySelector(`#${kind}`);
+      list.replaceChildren();
+      const events = [];
+      const record = text => {
+        events.push(text);
+        const item = document.createElement("li");
+        item.textContent = text;
+        if (text === "then getter") item.className = "getter";
+        list.append(item);
+        console.log(`[${kind}] ${text}`);
+      };
+      const thenable = {
+        get then() {
+          record("then getter");
+          return resolve => {
+            record("then function called");
+            resolve();
+          };
+        },
+      };
+      record("before call");
+      let completion;
+      if (kind === "ordinary") {
+        completion = Promise.resolve(thenable);
+      } else {
+        const stream = new ReadableStream({
+          start() {
+            return thenable;
+          },
+          pull(controller) {
+            controller.close();
+          },
+        });
+        const reader = stream.getReader();
+        completion = reader.read().finally(() => reader.releaseLock());
+      }
+      record("call returned");
+      await completion;
+      record("observation complete");
+      return events.indexOf("then getter") > events.indexOf("call returned");
+    }
+
+    runButton.addEventListener("click", async () => {
+      runButton.disabled = true;
+      runCount++;
+      status.textContent = `Run ${runCount}: observing execution order…`;
+      console.group(`SafePromiseResolve demo — run ${runCount}`);
+      try {
+        await traceResolution("ordinary");
+        const deferred = await traceResolution("stream");
+        status.textContent = deferred
+          ? `Run ${runCount}: deferred getter observed. The stream constructor returned first. Check the console for the browser warning.`
+          : `Run ${runCount}: synchronous getter observed. This browser’s stream path did not defer resolution.`;
+        runButton.textContent = "Run again (same page load)";
+      } catch (error) {
+        status.textContent = `Demo failed: ${error.message}`;
+        console.error(error);
+      } finally {
+        console.groupEnd();
+        runButton.disabled = false;
+      }
+    });
+    document.querySelector("#reload").addEventListener("click", () => location.reload());
+  </script>
+</body>
+</html>
